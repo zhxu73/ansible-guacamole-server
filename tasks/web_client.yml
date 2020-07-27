@@ -60,7 +60,7 @@
     path: "{{ GUACAMOLE_HOME }}"
     owner: tomcat7
     group: tomcat7
-    recursive: yes
+    recurse: yes
     state: directory
 
 - name: Restart Tomcat7 so its files are accessible
@@ -76,17 +76,17 @@
       get_url:
         dest: /tmp
         url: https://dl.eff.org/certbot-auto
-        mode: a+x
+        mode: 700
 
     - name: Use certbot-auto with no email
       command: >
         /tmp/certbot-auto certonly --standalone -n --agree-tos --register-unsafely-without-email -d {{ ansible_fqdn }}
-      when: letsencrypt_renew_email is not defined
+      when: letsencrypt_renew_email is not defined or letsencrypt_renew_email|length == 0 or letsencrypt_renew_email is none
 
     - name: Use certbot-auto with email
       command: >
         /tmp/certbot-auto certonly --standalone -n --agree-tos --email {{ letsencrypt_renew_email }} -d {{ ansible_fqdn }}
-      when: letsencrypt_renew_email is defined
+      when: letsencrypt_renew_email is defined and letsencrypt_renew_email|length > 0 and letsencrypt_renew_email is not none
 
     - name: Add nginx reverse proxy config to nginx
       template:
