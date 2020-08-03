@@ -1,68 +1,113 @@
 ---
 
-- name: Gather OS specific variables
-  include_vars: "{{ item }}"
-  with_first_found:
-    - "{{ ansible_distribution }}-{{ ansible_distribution_major_version}}.yml"
-    - "{{ ansible_distribution }}.yml"
+- name: SHELL; download docker-compose via url
+  become: true
+  shell: curl -L "https://github.com/docker/compose/releases/download/1.25.5/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  args:
+    creates: /usr/local/bin/docker-compose
 
-- name: Install pre-dependencies
-  package:
-    name: "{{ item }}"
-    state: present
-  with_items: "{{ PACKAGES.prep }}"
-  tags: prepare
+- name: FILE; change mode for /usr/local/bin/docker-compose
+  become: true
+  file:
+    path: /usr/local/bin/docker-compose
+    mode: '0755'
 
-- name: Add SSH keys to authorized_keys
-  authorized_key:
-    user: root
-    key: "{{ item }}"
-    state: present
-  with_items: "{{ SSH_KEYS_TO_ADD }}"
-  when: SSH_KEYS_TO_ADD is defined
+- name: Open UFW ports
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    state: enabled
+  with_items:
+    - "\"{{ nginx_port }}\""
+    - "\"{{ nginx_https_port }}\""
+    - "\"{{ ssh_port }}\""
 
-- name: Include guacd tasks
-  import_tasks: guacd.yml
-  tags: guacd
-
-- name: Include web_client tasks
-  import_tasks: web_client.yml
-  tags: web_client
-
-- tags: ufw
-  block:
-    - name: Open ports
-      ufw:
-        rule: allow
-        port: "{{ item }}"
-        state: enabled
-      with_items:
-        - "{{ nginx_port }}"
-        - "{{ nginx_https_port }}"
-        - "{{ ssh_port }}"
-
-    - name: Close Tomcat7 port
-      ufw:
-        rule: deny
-        port: "{{ tomcat_port }}"
-  when: ansible_distribution == "Ubuntu"
-
-- name: Cleanup temp files
+- name: Prepare config directories
   file:
     path: "{{ item }}"
-    state: absent
-  with_items:
-    - "/tmp/{{ guacamole_version }}.tar.gz"
-    - "/tmp/guacamole-server-{{ guacamole_version }}"
-  ignore_errors: yes
-  tags: cleanup
+    state: directory
+  loop:
+    - "{{ CONFIG_DIR }}"
+    - "{{ NGINX_DIR }}"
+    - "{{ GUACAMOLE_DIR }}"
+    - "{{ GUACAMOLE_DIR }}/keys"
+    - "{{ GUACAMOLE_DIR }}/extensions"
 
-- name: restart services (tomcat,guacd,nginx,ufw)
-  service:
-    name: "{{ item }}"
-    state: restarted
+- name: link /etc/guacamole to GUACAMOLE_DIR
+  file:
+    src: "{{ GUACAMOLE_DIR }}"
+    dest: "/etc/guacamole"
+    state: link
+
+- name: Fill out Nginx template
+  template:
+    src: "nginx-guacamole.conf.j2"
+    dest: "{{ NGINX_DIR }}/nginx-guacamole.conf"
+
+- name: Fill out guacamole.properties template
+  template:
+    src: "guacamole.properties.j2"
+    dest: "{{ GUACAMOLE_DIR }}/guacamole.properties"
+
+- name: Download theme file to extensions directory
+  get_url:
+    url: "https://github.com/cyverse/guac-cyverse-theme/releases/download/{{ install_type }}-theme/{{ install_type }}-theme.jar"
+    dest: "{{ GUACAMOLE_DIR }}/extensions/{{ install_type }}-theme.jar"
+
+- name: Download authentication plugin
+  get_url:
+    url: "https://github.com/cyverse/guacamole-auth-hmac/releases/download/{{ guacamole_version }}/guacamole-auth-hmac-{{ guacamole_version }}.jar"
+    dest: "{{ GUACAMOLE_DIR }}/extensions/guacamole-auth-hmac-{{ guacamole_version }}.jar"
+
+- name: Fill out docker-compose template
+  template:
+    src: "docker-compose.yml.j2"
+    dest: "{{ CONFIG_DIR }}/docker-compose.yml"
+
+- block:
+  - name: Get certbot auto
+    get_url:
+      dest: /tmp
+      url: https://dl.eff.org/certbot-auto
+      mode: a+x
+
+  - name: Use certbot-auto with no email
+    command: >
+      /tmp/certbot-auto certonly --standalone -n --agree-tos --register-unsafely-without-email -d {{ ansible_fqdn }}
+
+  - name: copy SSL files to path
+    copy:
+      src: "/etc/letsencrypt/live/{{ ansible_fqdn }}/{{ item }}"
+      dest: "{{ NGINX_DIR }}/{{ item }}"
+      remote_src: true
+    loop:
+      - "{{ ssl_cert_name }}"
+      - "{{ ssl_key_name }}"
+  when: local_ssl_path is not defined
+
+- name: copy over SSL files
+  copy:
+    src: "{{ local_ssl_path }}/{{ item }}"
+    dest: "{{ NGINX_DIR }}/{{ item }}"
+  loop:
+    - "{{ ssl_cert_name }}"
+    - "{{ ssl_key_name }}"
+  when: local_ssl_path is defined
+
+- name: copy over Guacamole systemd file
+  template:
+    src: "guacamole.service.j2"
+    dest: "{{ CONFIG_DIR }}/guacamole.service"
+
+- name: create symlink from systemd file to correct directory
+  file:
+    src: "{{ CONFIG_DIR }}/guacamole.service"
+    dest: "/etc/systemd/system/guacamole.service"
+    state: link
+
+- name: enable and start guacamole service
+  systemd:
+    name: guacamole.service
+    daemon_reload: yes
     enabled: yes
-  with_items: [ "{{ tomcat_service }}", guacd, nginx, ufw ]
-  ignore_errors: yes
-  tags: restart
-  changed_when: False
+    state: restarted
