@@ -65,15 +65,34 @@
     dest: "{{ CONFIG_DIR }}/docker-compose.yml"
 
 - block:
+  - name: Check if python2 is available (for certbot-auto)
+    shell: |
+      python2 --version
+    ignore_errors: true
+    register: check_py2
+
   - name: Get certbot auto
     get_url:
       dest: /tmp
       url: https://dl.eff.org/certbot-auto
       mode: a+x
+    when: check_py2.rc == 0
 
   - name: Use certbot-auto with no email
     command: >
       /tmp/certbot-auto certonly --standalone -n --agree-tos --register-unsafely-without-email -d {{ ansible_fqdn }}
+    when: check_py2.rc == 0
+
+  # Run certbot-auto in docker if there is no python2 (e.g. Ubuntu20)
+  - name: Use certbot-auto with no email (no py2)
+    shell: |
+      sudo docker run -it --rm --name certbot \
+            -p 80:80 \
+            -p 443:443 \
+            -v "/etc/letsencrypt:/etc/letsencrypt" \
+            -v "/var/lib/letsencrypt:/var/lib/letsencrypt" \
+            certbot/certbot certonly --standalone -n --agree-tos --register-unsafely-without-email -d {{ ansible_fqdn }}
+    when: check_py2.rc != 0
 
   - name: copy SSL files to path
     copy:
